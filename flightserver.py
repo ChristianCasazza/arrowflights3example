@@ -50,12 +50,14 @@ class FlightServer(flight.FlightServerBase):
         try:
             fs = s3fs.S3FileSystem(anon=False, key=self.aws_access_key_id, secret=self.aws_secret_access_key)
             logger.info(f"Created S3FileSystem with access key: {self.aws_access_key_id}")
-            
             logger.info(f"Reading Parquet file from S3 URI: {self.s3_uri}")
             parquet_file = pq.ParquetFile(self.s3_uri, filesystem=fs)
-            
+
+            # Specify the desired batch size
+            batch_size = 10000  # Adjust the batch size as needed
+
             logger.info("Returning GeneratorStream")
-            return flight.GeneratorStream(parquet_file.schema_arrow, parquet_file.iter_batches())
+            return flight.GeneratorStream(parquet_file.schema_arrow, parquet_file.iter_batches(batch_size=batch_size))
         except Exception as e:
             logger.error(f"Error occurred while retrieving data: {str(e)}")
             raise flight.FlightUnavailableError("Failed to retrieve data")
@@ -66,8 +68,9 @@ def serve(host="0.0.0.0", port=8815, s3_uri=None, aws_access_key_id=None, aws_se
     server = FlightServer(host, port, s3_uri, aws_access_key_id, aws_secret_access_key)
     server.serve()
 
+
 if __name__ == "__main__":
-    s3_uri = "s3:/path/to/parquet/file"
-    aws_access_key_id = "YOUR_ACCESS_KEY"
-    aws_secret_access_key = "YOUR_SECRET_KEY"
+    s3_uri = "s3path/francetax.parquet"
+    aws_access_key_id = "access_key"
+    aws_secret_access_key = "secret_key"
     serve(s3_uri=s3_uri, aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key)
