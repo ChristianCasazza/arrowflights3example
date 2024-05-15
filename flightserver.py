@@ -24,20 +24,17 @@ class FlightServer(flight.FlightServerBase):
         bucket, key = self._parse_s3_uri(self.s3_uri)
         descriptor = flight.FlightDescriptor.for_path(key.encode())
         endpoint = flight.FlightEndpoint(flight.Ticket(self.s3_uri.encode()), [self.location])
-        
         fs = s3fs.S3FileSystem(anon=False, key=self.aws_access_key_id, secret=self.aws_secret_access_key)
         schema = pq.read_schema(self.s3_uri, filesystem=fs)
-        
         return [flight.FlightInfo(schema, descriptor, [endpoint], -1, -1)]
 
     def get_flight_info(self, context, descriptor):
         bucket, key = self._parse_s3_uri(self.s3_uri)
-        
         fs = s3fs.S3FileSystem(anon=False, key=self.aws_access_key_id, secret=self.aws_secret_access_key)
-        
         try:
-            content_length = pq.read_metadata(self.s3_uri, filesystem=fs).num_rows
-            schema = pq.read_schema(self.s3_uri, filesystem=fs)
+            parquet_file = pq.ParquetFile(self.s3_uri, filesystem=fs)
+            content_length = parquet_file.metadata.num_rows
+            schema = parquet_file.schema_arrow
         except Exception as e:
             logger.error(f"Error occurred while accessing S3 object: {str(e)}")
             raise flight.FlightUnavailableError("Failed to retrieve flight info")
@@ -52,15 +49,37 @@ class FlightServer(flight.FlightServerBase):
             logger.info(f"Created S3FileSystem with access key: {self.aws_access_key_id}")
             logger.info(f"Reading Parquet file from S3 URI: {self.s3_uri}")
             parquet_file = pq.ParquetFile(self.s3_uri, filesystem=fs)
+            schema = parquet_file.schema_arrow
 
-            # Specify the desired batch size
-            batch_size = 10000  # Adjust the batch size as needed
+            # Specify the desired batch size and chunk size
+            batch_size = 50000  
+            chunk_size = 1024 * 1024  
+
+            # Enable Arrow IPC compression for data transfer
+            options = pa.ipc.IpcWriteOptions(compression='zstd')
+
+            # Use Arrow's streaming functionality to process data in chunks
+            def batch_iterator():
+                writer = None
+                for batch in parquet_file.iter_batches(batch_size=batch_size):
+                    if writer is None:
+                        # Initialize the RecordBatchStreamWriter on the first batch
+                        sink = pa.BufferOutputStream()
+                        writer = pa.ipc.new_stream(sink, batch.schema)
+                    writer.write_batch(batch)
+                    logger.info(f"Yielding batch with {batch.num_rows} rows")
+                    yield batch
+
+                if writer is not None:
+                    writer.close()
 
             logger.info("Returning GeneratorStream")
-            return flight.GeneratorStream(parquet_file.schema_arrow, parquet_file.iter_batches(batch_size=batch_size))
+            return flight.GeneratorStream(schema, batch_iterator())
+
         except Exception as e:
             logger.error(f"Error occurred while retrieving data: {str(e)}")
             raise flight.FlightUnavailableError("Failed to retrieve data")
+
         finally:
             logger.info("Exiting do_get method")
 
@@ -68,9 +87,8 @@ def serve(host="0.0.0.0", port=8815, s3_uri=None, aws_access_key_id=None, aws_se
     server = FlightServer(host, port, s3_uri, aws_access_key_id, aws_secret_access_key)
     server.serve()
 
-
 if __name__ == "__main__":
-    s3_uri = "s3path/francetax.parquet"
-    aws_access_key_id = "access_key"
-    aws_secret_access_key = "secret_key"
+    s3_uri = "s3://pathto.parquet"
+    aws_access_key_id = ""
+    aws_secret_access_key = ""
     serve(s3_uri=s3_uri, aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key)
